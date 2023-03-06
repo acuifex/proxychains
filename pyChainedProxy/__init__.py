@@ -84,6 +84,8 @@ PROTOCOL_NAMES = {
 }
 
 DEFAULT_ROUTE = '*'
+
+# map[list[Proxy]]
 _proxyroutes = {}
 _orgsocket = socket.socket
 _orgcreateconn = getattr(socket, 'create_connection', None)
@@ -183,7 +185,7 @@ def setdefaultproxy(proxy: Proxy | None):
 
 
 def adddefaultproxy(proxy: Proxy):
-    if proxy is not None and proxy.type == ProxyType.DEFAULT:
+    if proxy.type == ProxyType.DEFAULT:
         raise ValueError("Circular reference to default proxy.")
     return addproxy(DEFAULT_ROUTE, proxy)
 
