@@ -1,5 +1,13 @@
-import base64, socket, sys, struct, threading, ssl
+import base64
+import re
+import socket
+import ssl
+import struct
+import sys
+import threading
+from dataclasses import dataclass
 from enum import IntEnum, auto
+from urllib.parse import urlparse
 
 ENABLE_DEBUG = False
 def DEBUG(foo): print(foo)
@@ -18,6 +26,24 @@ class ProxyType(IntEnum):
     HTTP_CONNECT = auto()
     HTTPS_CONNECT = auto()
 
+@dataclass
+class Proxy:
+    type: ProxyType = ProxyType.DEFAULT
+    host: str = None
+    port: int = 0
+    remote_dns: bool = False
+    username: str = None
+    password: str = None
+
+
+
+# P_TYPE = 0
+# P_HOST = 1
+# P_PORT = 2
+# P_RDNS = 3
+# P_USER = 4
+# P_PASS = 5
+# P_CERTS = 6
 
 PROXY_SSL_TYPES = (ProxyType.SSL, ProxyType.SSL_WEAK,
                    ProxyType.SSL_ANON, ProxyType.HTTPS,
@@ -25,7 +51,7 @@ PROXY_SSL_TYPES = (ProxyType.SSL, ProxyType.SSL_WEAK,
 PROXY_HTTP_TYPES = (ProxyType.HTTP, ProxyType.HTTPS)
 PROXY_HTTPC_TYPES = (ProxyType.HTTP_CONNECT, ProxyType.HTTPS_CONNECT)
 PROXY_SOCKS5_TYPES = (ProxyType.SOCKS5, ProxyType.TOR)
-PROXY_DEFAULTS = {
+PROXY_DEFAULT_PORT = {
     ProxyType.NONE: 0,
     ProxyType.DEFAULT: 0,
     ProxyType.HTTP: 8080,
@@ -39,7 +65,7 @@ PROXY_DEFAULTS = {
     ProxyType.SSL_WEAK: 443,
     ProxyType.SSL_ANON: 443,
 }
-PROXY_TYPES = {
+PROTOCOL_NAMES = {
     'none': ProxyType.NONE,
     'default': ProxyType.DEFAULT,
     'defaults': ProxyType.DEFAULT,
@@ -56,14 +82,6 @@ PROXY_TYPES = {
     'ssl-anon': ProxyType.SSL_ANON,
     'ssl-weak': ProxyType.SSL_WEAK,
 }
-
-P_TYPE = 0
-P_HOST = 1
-P_PORT = 2
-P_RDNS = 3
-P_USER = 4
-P_PASS = 5
-P_CERTS = 6
 
 DEFAULT_ROUTE = '*'
 _proxyroutes = {}
@@ -115,52 +133,27 @@ _socks4errors = (
     "unknown error")
 
 
-def parseproxy(arg):
+def parseproxy(proxy_url: str) -> Proxy:
     # This silly function will do a quick-and-dirty parse of our argument
     # into a proxy specification array. It lets people omit stuff.
-    if '!' in arg:
-        # Prefer ! to :, because it works with IPv6 addresses.
-        args = arg.split('!')
-    else:
-        # This is a bit messier to accept common URL syntax
-        if arg.endswith('/'):
-            arg = arg[:-1]
-        args = arg.replace('://', ':').replace('/:', ':').split(':')
-    args[0] = PROXY_TYPES[args[0] or 'http']
-
-    if (len(args) in (3, 4, 5)) and ('@' in args[2]):
-        # Re-order http://user:pass@host:port/ => http:host:port:user:pass
-        pwd, host = args[2].split('@')
-        user = args[1]
-        args[1:3] = [host]
-        if len(args) == 2: args.append(PROXY_DEFAULTS[args[0]])
-        if len(args) == 3: args.append(False)
-        args.extend([user, pwd])
-    elif (len(args) in (2, 3, 4)) and ('@' in args[1]):
-        user, host = args[1].split('@')
-        args[1] = host
-        if len(args) == 2: args.append(PROXY_DEFAULTS[args[0]])
-        if len(args) == 3: args.append(False)
-        args.append(user)
-
-    if len(args) == 2: args.append(PROXY_DEFAULTS[args[0]])
-    if len(args) > 2: args[2] = int(args[2])
-
-    if args[P_TYPE] in PROXY_SSL_TYPES:
-        names = (args[P_HOST] or '').split(',')
-        args[P_HOST] = names[0]
-        while len(args) <= P_CERTS:
-            args.append((len(args) == P_RDNS) and True or None)
-        args[P_CERTS] = (len(names) > 1) and names[1:] or names
-
-    return args
+    if re.match("\w+://", proxy_url) is None:
+        # doesn't start with a protocol. assume http
+        proxy_url = "http://" + proxy_url
+    parsed_url = urlparse(proxy_url)
+    scheme = PROTOCOL_NAMES[parsed_url.scheme]
+    return Proxy(
+        scheme,
+        parsed_url.hostname,
+        PROXY_DEFAULT_PORT[scheme] if parsed_url.port is None else parsed_url.port,
+        False,
+        parsed_url.username,
+        parsed_url.password,
+    )
 
 
-def addproxy(dest, proxytype=None, addr=None, port=None, rdns=True,
-             username=None, password=None, certnames=None):
+def addproxy(dest: str, proxy: Proxy):
     global _proxyroutes
     route = _proxyroutes.get(dest.lower(), None)
-    proxy = (proxytype, addr, port, rdns, username, password, certnames)
     if route is None:
         route = _proxyroutes.get(DEFAULT_ROUTE, [])[:]
     route.append(proxy)
@@ -168,31 +161,31 @@ def addproxy(dest, proxytype=None, addr=None, port=None, rdns=True,
     if ENABLE_DEBUG: DEBUG('Routes are: %s' % (_proxyroutes,))
 
 
-def setproxy(dest, *args, **kwargs):
+def setproxy(dest: str, proxy: Proxy | None):
     global _proxyroutes
     dest = dest.lower()
-    if args:
+    if proxy is not None:
         _proxyroutes[dest] = []
-        return addproxy(dest, *args, **kwargs)
+        return addproxy(dest, proxy)
     else:
         if dest in _proxyroutes:
             del _proxyroutes[dest.lower()]
 
 
-def setdefaultproxy(*args, **kwargs):
+def setdefaultproxy(proxy: Proxy | None):
     """setdefaultproxy(proxytype, addr[, port[, rdns[, username[, password[, certnames]]]]])
     Sets a default proxy which all further socksocket objects will use,
     unless explicitly changed.
     """
-    if args and args[P_TYPE] == ProxyType.DEFAULT:
+    if proxy is not None and proxy.type == ProxyType.DEFAULT:
         raise ValueError("Circular reference to default proxy.")
-    return setproxy(DEFAULT_ROUTE, *args, **kwargs)
+    return setproxy(DEFAULT_ROUTE, proxy)
 
 
-def adddefaultproxy(*args, **kwargs):
-    if args and args[P_TYPE] == ProxyType.DEFAULT:
+def adddefaultproxy(proxy: Proxy):
+    if proxy is not None and proxy.type == ProxyType.DEFAULT:
         raise ValueError("Circular reference to default proxy.")
-    return addproxy(DEFAULT_ROUTE, *args, **kwargs)
+    return addproxy(DEFAULT_ROUTE, proxy)
 
 
 def usesystemdefaults():
@@ -203,12 +196,12 @@ def usesystemdefaults():
                                    os.environ.get('NO_PROXY',
                                                   '')).split(','))
     for host in no_proxy:
-        setproxy(host, ProxyType.NONE)
+        setproxy(host, Proxy(ProxyType.NONE))
 
     for var in ('ALL_PROXY', 'HTTPS_PROXY', 'http_proxy'):
         val = os.environ.get(var.lower(), os.environ.get(var, None))
         if val:
-            setdefaultproxy(*parseproxy(val))
+            setdefaultproxy(parseproxy(val))
             os.environ[var] = ''
             return
 
@@ -221,7 +214,9 @@ def sockcreateconn(*args, **kwargs):
     finally:
         del (_thread_locals.create_conn)
 
-
+def _pascal_encode(s: str) -> bytes:
+    length = len(s) if len(s) <= 255 else 255  # this will cut the rest.
+    return struct.pack("B%ds" % length, length, s)
 class socksocket(socket.socket):
     """socksocket([family[, type[, proto]]]) -> socket object
     Open a SOCKS enabled socket. The parameters are the same as
@@ -265,7 +260,7 @@ class socksocket(socket.socket):
             return setattr(object.__getattribute__(self, "_socksocket__sock"),
                            name, value)
 
-    def __recvall(self, count):
+    def __recvall(self, count: int) -> bytes:
         """__recvall(count) -> data
         Receive EXACTLY the number of bytes requested from the socket.
         Blocks until the required number of bytes have been received or a
@@ -292,7 +287,7 @@ class socksocket(socket.socket):
         self.__makefile_refs += 1
         return socket.SocketIO(self, mode)
 
-    def addproxy(self, proxytype=None, addr=None, port=None, rdns=True, username=None, password=None, certnames=None):
+    def addproxy(self, proxy: Proxy):
         """setproxy(proxytype, addr[, port[, rdns[, username[, password[, certnames]]]]])
         Sets the proxy to be used.
         proxytype -    The type of the proxy to be used. Three types
@@ -309,8 +304,8 @@ class socksocket(socket.socket):
         password -    Password to authenticate with to the server.
                 Only relevant when username is also provided.
         """
-        proxy = (proxytype, addr, port, rdns, username, password, certnames)
-        if not self.__proxy: self.__proxy = []
+        if not self.__proxy:
+            self.__proxy = []
         self.__proxy.append(proxy)
 
     def setproxy(self, *args, **kwargs):
@@ -320,12 +315,12 @@ class socksocket(socket.socket):
         self.__proxy = []
         self.addproxy(*args, **kwargs)
 
-    def __negotiatesocks5(self, destaddr, destport, proxy):
+    def __negotiatesocks5(self, destaddr: str, destport: int, proxy: Proxy):
         """__negotiatesocks5(self, destaddr, destport, proxy)
         Negotiates a connection through a SOCKS5 server.
         """
         # First we'll send the authentication packages we support.
-        if (proxy[P_USER] != None) and (proxy[P_PASS] != None):
+        if proxy.username is not None and proxy.password is not None:
             # The username/password details were supplied to the
             # setproxy method so we support the USERNAME/PASSWORD
             # authentication (in addition to the standard none).
@@ -337,25 +332,23 @@ class socksocket(socket.socket):
         # We'll receive the server's response to determine which
         # method was selected
         chosenauth = self.__recvall(2)
-        if chosenauth[0:1] != chr(0x05).encode():
+        if chosenauth[0] != 0x05:
             self.close()
             raise GeneralProxyError((1, _generalerrors[1]))
         # Check the chosen authentication method
-        if chosenauth[1:2] == chr(0x00).encode():
+        if chosenauth[1] == 0x00:
             # No authentication is required
             pass
-        elif chosenauth[1:2] == chr(0x02).encode():
+        elif chosenauth[1] == 0x02:
             # Okay, we need to perform a basic username/password
             # authentication.
-            self.sendall(chr(0x01).encode() +
-                         chr(len(proxy[P_USER])) + proxy[P_USER] +
-                         chr(len(proxy[P_PASS])) + proxy[P_PASS])
+            self.sendall(b"\x01" + _pascal_encode(proxy.username) + _pascal_encode(proxy.password))
             authstat = self.__recvall(2)
-            if authstat[0:1] != chr(0x01).encode():
+            if authstat[0] != 0x01:
                 # Bad response
                 self.close()
                 raise GeneralProxyError((1, _generalerrors[1]))
-            if authstat[1:2] != chr(0x00).encode():
+            if authstat[1] != 0x00:
                 # Authentication failed
                 self.close()
                 raise Socks5AuthError((3, _socks5autherrors[3]))
@@ -363,7 +356,7 @@ class socksocket(socket.socket):
         else:
             # Reaching here is always bad
             self.close()
-            if chosenauth[1] == chr(0xFF).encode():
+            if chosenauth[1] == 0xFF:
                 raise Socks5AuthError((2, _socks5autherrors[2]))
             else:
                 raise GeneralProxyError((1, _generalerrors[1]))
@@ -373,26 +366,26 @@ class socksocket(socket.socket):
         # use the IPv4 address request even if remote resolving was specified.
         try:
             ipaddr = socket.inet_aton(destaddr)
-            req = req + chr(0x01).encode() + ipaddr
+            req = req + b"\x01" + ipaddr
         except socket.error:
             # Well it's not an IP number,  so it's probably a DNS name.
-            if proxy[P_RDNS]:
+            if proxy.remote_dns:
                 # Resolve remotely
                 ipaddr = None
-                req = req + (chr(0x03).encode() +
-                             chr(len(destaddr)).encode() + destaddr.encode("latin-1"))
+                req = req + (b"\x03" + _pascal_encode(destaddr))
             else:
                 # Resolve locally
                 ipaddr = socket.inet_aton(socket.gethostbyname(destaddr))
-                req = req + chr(0x01).encode() + ipaddr
-        req = req + struct.pack(">H", destport)
+                req = req + b"\x01" + ipaddr
+        # network endian
+        req = req + struct.pack("!H", destport)
         self.sendall(req)
         # Get the response
         resp = self.__recvall(4)
-        if resp[0:1] != chr(0x05).encode():
+        if resp[0] != 0x05:
             self.close()
             raise GeneralProxyError((1, _generalerrors[1]))
-        elif resp[1:2] != chr(0x00).encode():
+        elif resp[1] != 0x00:
             # Connection failed
             self.close()
             if ord(resp[1:2]) <= 8:
@@ -401,15 +394,15 @@ class socksocket(socket.socket):
             else:
                 raise Socks5Error((9, _socks5errors[9]))
         # Get the bound address/port
-        elif resp[3:4] == chr(0x01).encode():
+        elif resp[3] == 0x01:
             boundaddr = self.__recvall(4)
-        elif resp[3:4] == chr(0x03).encode():
+        elif resp[3] == 0x03:
             resp = resp + self.recv(1)
-            boundaddr = self.__recvall(ord(resp[4:5]))
+            boundaddr = self.__recvall(resp[4])
         else:
             self.close()
             raise GeneralProxyError((1, _generalerrors[1]))
-        boundport = struct.unpack(">H", self.__recvall(2))[0]
+        boundport = struct.unpack("!H", self.__recvall(2))[0]
         self.__proxysockname = (boundaddr, boundport)
         if ipaddr != None:
             self.__proxypeername = (socket.inet_ntoa(ipaddr), destport)
@@ -435,7 +428,7 @@ class socksocket(socket.socket):
         """
         return self.__proxypeername
 
-    def __negotiatesocks4(self, destaddr, destport, proxy):
+    def __negotiatesocks4(self, destaddr: str, destport: int, proxy: Proxy):
         """__negotiatesocks4(self, destaddr, destport, proxy)
         Negotiates a connection through a SOCKS4 server.
         """
@@ -445,52 +438,55 @@ class socksocket(socket.socket):
             ipaddr = socket.inet_aton(destaddr)
         except socket.error:
             # It's a DNS name. Check where it should be resolved.
-            if proxy[P_RDNS]:
+            if proxy.remote_dns:
                 ipaddr = struct.pack("BBBB", 0x00, 0x00, 0x00, 0x01)
                 rmtrslv = True
             else:
                 ipaddr = socket.inet_aton(socket.gethostbyname(destaddr))
         # Construct the request packet
-        req = struct.pack(">BBH", 0x04, 0x01, destport) + ipaddr
+        req = struct.pack("!BBH", 0x04, 0x01, destport) + ipaddr
         # The username parameter is considered userid for SOCKS4
-        if proxy[P_USER] != None:
-            req = req + proxy[P_USER]
-        req = req + chr(0x00).encode()
+        if proxy.username is not None:
+            req = req + proxy.username.encode("utf-8")
+        req = req + b"\x00"
         # DNS name if remote resolving is required
         # NOTE: This is actually an extension to the SOCKS4 protocol
         # called SOCKS4A and may not be supported in all cases.
         if rmtrslv:
-            req = req + destaddr + chr(0x00).encode()
+            req = req + destaddr.encode("utf-8") + b"\x00"
         self.sendall(req)
         # Get the response from the server
         resp = self.__recvall(8)
-        if resp[0:1] != chr(0x00).encode():
+        if resp[0] != 0x00:
             # Bad data
             self.close()
             raise GeneralProxyError((1, _generalerrors[1]))
-        if resp[1:2] != chr(0x5A).encode():
+        if resp[1] != 0x5A:
             # Server returned an error
             self.close()
-            if ord(resp[1:2]) in (91, 92, 93):
+            if resp[1] in (91, 92, 93):
                 self.close()
-                raise Socks4Error((ord(resp[1:2]), _socks4errors[ord(resp[1:2]) - 90]))
+                raise Socks4Error((resp[1], _socks4errors[resp[1] - 90]))
             else:
                 raise Socks4Error((94, _socks4errors[4]))
         # Get the bound address/port
         self.__proxysockname = (socket.inet_ntoa(resp[4:]),
-                                struct.unpack(">H", resp[2:4])[0])
+                                struct.unpack("!H", resp[2:4])[0])
+
+        # FIXME: not sure what is going on here. was he trying to check against false?
         if rmtrslv != None:
             self.__proxypeername = (socket.inet_ntoa(ipaddr), destport)
         else:
             self.__proxypeername = (destaddr, destport)
 
-    def __getproxyauthheader(self, proxy):
-        if proxy[P_USER] and proxy[P_PASS]:
-            auth = proxy[P_USER] + ":" + proxy[P_PASS]
+    def __getproxyauthheader(self, proxy: Proxy) -> str:
+        if proxy.username is not None and proxy.password is not None:
+            auth = proxy.username + ":" + proxy.password
             return "Proxy-Authorization: Basic %s\r\n" % base64.b64encode(auth.encode("utf-8")).decode("utf-8")
         else:
             return ""
 
+    # TODO: type annotate
     def __stop_http_negotiation(self):
         buf = self.__buffer
         host, port, proxy = self.__negotiating
@@ -500,7 +496,7 @@ class socksocket(socket.socket):
         self.__override.remove('sendall')
         return (buf, host, port, proxy)
 
-    def recv(self, count, flags=0):
+    def recv(self, count:int, flags=0) -> bytes:
         if self.__negotiating:
             # If the calling code tries to read before negotiating is done,
             # assume this is not HTTP, bail and attempt HTTP CONNECT.
@@ -514,7 +510,8 @@ class socksocket(socket.socket):
             except ssl.SSLError:
                 pass
 
-    def recv_into(self, buf, nbytes=0, flags=0):
+    # TODO: type annotate buffer?
+    def recv_into(self, buf, nbytes=0, flags=0) -> int:
         if self.__negotiating:
             # If the calling code tries to read before negotiating is done,
             # assume this is not HTTP, bail and attempt HTTP CONNECT.
@@ -528,13 +525,14 @@ class socksocket(socket.socket):
             except ssl.SSLError:
                 pass
 
+    # TODO: type annotate args to ReadableBuffer (can you even have that type?)
     def send(self, *args, **kwargs):
         if self.__negotiating:
             self.__buffer += args[0]
             self.__negotiatehttpproxy()
         else:
             return self.__sock.send(*args, **kwargs)
-
+    # TODO: same as above
     def sendall(self, *args, **kwargs):
         if self.__negotiating:
             self.__buffer += args[0]
@@ -542,7 +540,7 @@ class socksocket(socket.socket):
         else:
             return self.__sock.sendall(*args, **kwargs)
 
-    def __negotiatehttp(self, destaddr, destport, proxy):
+    def __negotiatehttp(self, destaddr: str, destport: int, proxy: Proxy):
         """__negotiatehttpproxy(self, destaddr, destport, proxy)
         Negotiates a connection through an HTTP proxy server.
         """
@@ -603,12 +601,12 @@ class socksocket(socket.socket):
         if ENABLE_DEBUG: DEBUG("*** Proxy request:\n%s***" % CRLF.join(headers))
         self.__sock.sendall(CRLF.join(headers))
 
-    def __negotiatehttpconnect(self, destaddr, destport, proxy):
+    def __negotiatehttpconnect(self, destaddr: str, destport: int, proxy: Proxy):
         """__negotiatehttp(self, destaddr, destport, proxy)
         Negotiates an HTTP CONNECT through an HTTP proxy server.
         """
         # If we need to resolve locally, we do this now
-        if not proxy[P_RDNS]:
+        if not proxy.remote_dns:
             addr = socket.gethostbyname(destaddr)
         else:
             addr = destaddr
@@ -640,12 +638,12 @@ class socksocket(socket.socket):
         self.__proxysockname = ("0.0.0.0", 0)
         self.__proxypeername = (addr, destport)
 
-    def __negotiatessl(self, destaddr, destport, proxy,
+    def __negotiatessl(self, destaddr: str, destport: int, proxy: Proxy,
                        weak=False, anonymous=False):
         """__negotiatessl(self, destaddr, destport, proxy)
         Negotiates an SSL session.
         """
-        want_hosts = proxy[P_HOST]
+        want_hosts = proxy.host
 
         try:
             context = ssl.create_default_context()
@@ -659,15 +657,16 @@ class socksocket(socket.socket):
         self.__encrypted = True
         if ENABLE_DEBUG: DEBUG('*** Wrapped %s:%s in %s' % (destaddr, destport,
                                                      self.__sock))
-
-    def __default_route(self, dest):
+    # TODO: type annotate return value
+    def __default_route(self, dest: str):
         route = _proxyroutes.get(str(dest).lower(), [])[:]
-        if not route or route[0][P_TYPE] == ProxyType.DEFAULT:
+        if not route or route[0].type == ProxyType.DEFAULT:
             route[0:1] = _proxyroutes.get(DEFAULT_ROUTE, [])
-        while route and route[0][P_TYPE] == ProxyType.DEFAULT:
+        while route and route[0].type == ProxyType.DEFAULT:
             route.pop(0)
         return route
 
+    # TODO: type annotate
     def __do_connect(self, addrspec):
         if ':' in addrspec[0]:
             self.__sock = _orgsocket(socket.AF_INET6, self.__type, self.__proto,
@@ -683,6 +682,7 @@ class socksocket(socket.socket):
                                          *self.__args, **self.__kwargs)
                 return self.__sock.connect(addrspec)
 
+    # TODO: type annotate
     def connect(self, destpair):
         """connect(self, despair)
         Connects to the specified destination through a chain of proxies.
@@ -707,11 +707,12 @@ class socksocket(socket.socket):
             default_dest = DEFAULT_ROUTE
 
         for proxy in proxy_chain:
-            if (proxy[P_TYPE] or ProxyType.NONE) not in PROXY_DEFAULTS:
+            # TODO: is it even possible to end up here?
+            if (proxy.type or ProxyType.NONE) not in PROXY_DEFAULT_PORT:
                 raise GeneralProxyError((4, _generalerrors[4]))
 
         chain = proxy_chain[:]
-        chain.append([ProxyType.NONE, destpair[0], destpair[1]])
+        chain.append(Proxy(ProxyType.NONE, destpair[0], destpair[1]))
         if ENABLE_DEBUG: DEBUG('*** Chain: %s' % (chain,))
 
         first = True
@@ -719,34 +720,34 @@ class socksocket(socket.socket):
         while chain:
             proxy = chain.pop(0)
 
-            if proxy[P_TYPE] == ProxyType.DEFAULT:
+            if proxy.type == ProxyType.DEFAULT:
                 chain[0:0] = self.__default_route(default_dest)
                 if ENABLE_DEBUG: DEBUG('*** Chain: %s' % chain)
                 continue
 
-            if proxy[P_PORT] != None:
-                portnum = proxy[P_PORT]
+            if proxy.port != 0:
+                portnum = proxy.port
             else:
-                portnum = PROXY_DEFAULTS[proxy[P_TYPE] or ProxyType.NONE]
+                portnum = PROXY_DEFAULT_PORT[proxy.type or ProxyType.NONE]
 
-            if first and proxy[P_HOST]:
-                if ENABLE_DEBUG: DEBUG('*** Connect: %s:%s' % (proxy[P_HOST], portnum))
-                result = self.__do_connect((proxy[P_HOST], portnum))
+            if first and proxy.host:
+                if ENABLE_DEBUG: DEBUG('*** Connect: %s:%s' % (proxy.host, portnum))
+                result = self.__do_connect((proxy.host, portnum))
 
             if chain:
-                nexthop = (chain[0][P_HOST] or '', int(chain[0][P_PORT] or 0))
+                nexthop = (chain[0].host or '', int(chain[0].port or 0))
 
-                if proxy[P_TYPE] in PROXY_SSL_TYPES:
+                if proxy.type in PROXY_SSL_TYPES:
                     if ENABLE_DEBUG: DEBUG('*** TLS/SSL Setup: %s' % (nexthop,))
                     self.__negotiatessl(nexthop[0], nexthop[1], proxy,
-                                        weak=(proxy[P_TYPE] == ProxyType.SSL_WEAK),
-                                        anonymous=(proxy[P_TYPE] == ProxyType.SSL_ANON))
+                                        weak=(proxy.type == ProxyType.SSL_WEAK),
+                                        anonymous=(proxy.type == ProxyType.SSL_ANON))
 
-                if proxy[P_TYPE] in PROXY_HTTPC_TYPES:
+                if proxy.type in PROXY_HTTPC_TYPES:
                     if ENABLE_DEBUG: DEBUG('*** HTTP CONNECT: %s' % (nexthop,))
                     self.__negotiatehttpconnect(nexthop[0], nexthop[1], proxy)
 
-                elif proxy[P_TYPE] in PROXY_HTTP_TYPES:
+                elif proxy.type in PROXY_HTTP_TYPES:
                     if len(chain) > 1:
                         # Chaining requires HTTP CONNECT.
                         if ENABLE_DEBUG: DEBUG('*** HTTP CONNECT: %s' % (nexthop,))
@@ -757,15 +758,15 @@ class socksocket(socket.socket):
                         if ENABLE_DEBUG: DEBUG('*** HTTP PROXY: %s' % (nexthop,))
                         self.__negotiatehttp(nexthop[0], nexthop[1], proxy)
 
-                if proxy[P_TYPE] in PROXY_SOCKS5_TYPES:
+                if proxy.type in PROXY_SOCKS5_TYPES:
                     if ENABLE_DEBUG: DEBUG('*** SOCKS5: %s' % (nexthop,))
                     self.__negotiatesocks5(nexthop[0], nexthop[1], proxy)
 
-                elif proxy[P_TYPE] == ProxyType.SOCKS4:
+                elif proxy.type == ProxyType.SOCKS4:
                     if ENABLE_DEBUG: DEBUG('*** SOCKS4: %s' % (nexthop,))
                     self.__negotiatesocks4(nexthop[0], nexthop[1], proxy)
 
-                elif proxy[P_TYPE] == ProxyType.NONE:
+                elif proxy.type == ProxyType.NONE:
                     if first and nexthop[0] and nexthop[1]:
                         if ENABLE_DEBUG: DEBUG('*** Connect: %s:%s' % nexthop)
                         result = self.__do_connect(nexthop)
