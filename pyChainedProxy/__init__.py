@@ -567,8 +567,9 @@ class socksocket(socket.socket):
         if len(buf) <= 3: return
 
         # If not HTTP, fall back to HTTP CONNECT.
+        # TODO: this doesn't seem like a good check. unknown "pro" method
         if buf[0:3].decode("utf-8").lower() not in ('get', 'pos', 'hea',
-                                                    'put', 'del', 'opt', 'pro'):
+                                                    'put', 'del', 'opt', 'pro', 'pat', 'tra'):
             if ENABLE_DEBUG: DEBUG("*** Not HTTP, failing back to HTTP CONNECT.")
             self.__stop_http_negotiation()
             self.__negotiatehttpconnect(host, port, proxy)
