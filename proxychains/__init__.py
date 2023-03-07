@@ -1,3 +1,19 @@
+# A python module for Chaining of Proxies
+# Copyright (C) 2023  acuifex
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import base64
 import re
 import socket
@@ -32,19 +48,9 @@ class Proxy:
     type: ProxyType = ProxyType.DEFAULT
     host: str = None
     port: int = 0
-    remote_dns: bool = False
+    remote_dns: bool = True
     username: str = None
     password: str = None
-
-
-
-# P_TYPE = 0
-# P_HOST = 1
-# P_PORT = 2
-# P_RDNS = 3
-# P_USER = 4
-# P_PASS = 5
-# P_CERTS = 6
 
 PROXY_SSL_TYPES = (ProxyType.SSL, ProxyType.SSL_WEAK,
                    ProxyType.SSL_ANON, ProxyType.HTTPS,
@@ -563,7 +569,6 @@ class socksocket(socket.socket):
         Negotiates an HTTP request through an HTTP proxy server.
         """
         buf = self.__buffer
-        # buf = buf.replace("b'", "").replace("\\r","\r").replace("\\n","\n")
         host, port, proxy = self.__negotiating
 
         # If our buffer is tiny, wait for data.
