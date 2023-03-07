@@ -8,6 +8,7 @@ import threading
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from urllib.parse import urlparse
+from urllib3.util.ssltransport import SSLTransport
 
 ENABLE_DEBUG = False
 def DEBUG(foo): print(foo)
@@ -268,7 +269,9 @@ class socksocket(socket.socket):
         Blocks until the required number of bytes have been received or a
         timeout occurs.
         """
-        self.__sock.setblocking(True)
+        # FIXME: this is a workaround for SSLTransport.
+        if getattr(self.__sock, "setblocking", None):
+            self.__sock.setblocking(True)
         self.__sock.settimeout(20)
 
         data = self.recv(count)
@@ -650,7 +653,15 @@ class socksocket(socket.socket):
 
         try:
             context = ssl.create_default_context()
-            self.__sock = context.wrap_socket(self.__sock, server_hostname=want_hosts)
+            # ssl.wrap_socket moves socket into a new object, and returns to us a proxy object,
+            #  leaving the underlying socket the same.
+            #  This prevents us from wrapping the same socket twice with ssl.
+            # use wrap_bio instead:
+            # https://github.com/python/cpython/blob/c84e6f32df989908685ea8b6cd49ddde9f428524/Lib/test/test_ssl.py#L2106-L2121
+            # self.__sock = context.wrap_socket(self.__sock, server_hostname=want_hosts)
+
+            # Thanks urllib for this very specific class, that utilizes wrap_bio instead of wrap_socket
+            self.__sock = SSLTransport(self.__sock, context, server_hostname=want_hosts)
         except:
             if ENABLE_DEBUG: DEBUG('*** SSL problem: %s/%s/%s' % (sys.exc_info(),
                                                            self.__sock,
