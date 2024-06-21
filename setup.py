@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name='proxychains',
-    version='1.0',
+    version='1.0.1',
     author="acuifex",
     author_email="proxychains@acuifex.ru",
     description="A python module for Chaining of Proxies.",

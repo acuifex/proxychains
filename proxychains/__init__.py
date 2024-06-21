@@ -223,9 +223,12 @@ def sockcreateconn(*args, **kwargs):
     finally:
         del (_thread_locals.create_conn)
 
+
 def _pascal_encode(s: str) -> bytes:
     length = len(s) if len(s) <= 255 else 255  # this will cut the rest.
-    return struct.pack("B%ds" % length, length, s)
+    return struct.pack("B%ds" % length, length, s.encode())
+
+
 class socksocket(socket.socket):
     """socksocket([family[, type[, proto]]]) -> socket object
     Open a SOCKS enabled socket. The parameters are the same as
